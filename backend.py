@@ -18,7 +18,7 @@ mongo_client = MongoClient(os.getenv("MONGO_URI"))
 db = mongo_client["chatbot_db"]
 users_collection = db["users"]
 chat_collection = db["chat_history"]
-feedback_collection = db["chat_feedback"]  # 🆕 Feedback collection
+feedback_collection = db["chat_feedback"]
 
 # Load users from JSON
 with open("users.json") as f:
@@ -27,12 +27,12 @@ with open("users.json") as f:
         if not users_collection.find_one({"username": user["username"]}):
             users_collection.insert_one(user)
 
-# User authentication
+# Authenticate user
 def login_user(username, password):
     user = users_collection.find_one({"username": username, "password": password})
     return user is not None
 
-# Initialize Vector Store
+# Initialize vector store
 def initialize_vector_store():
     vector_store = VectorStore("data/")
     if not vector_store.is_index_built():
@@ -63,8 +63,11 @@ def format_citations(relevant_chunks):
 
     return "\n".join(formatted_citations)
 
-# Greetings set
+# Greeting set
 greetings = {"hi", "hello", "hey", "hii", "good morning", "good evening"}
+
+def is_greeting(text):
+    return text.strip().lower() in greetings
 
 # Save chat history
 def save_chat_history(username, user_query, bot_response):
@@ -77,23 +80,45 @@ def save_chat_history(username, user_query, bot_response):
     result = chat_collection.insert_one(chat_doc)
     print(f"Inserted chat document with id: {result.inserted_id}")
 
-# 🆕 Save user feedback
+# Update chat response
+def update_last_chat_response(username, user_query, new_response, new_context=None, new_citations=None):
+    filter_query = {
+        "username": username,
+        "query": user_query
+    }
+    update_fields = {
+        "response": new_response,
+        "timestamp": datetime.utcnow(),
+    }
+    if new_context is not None:
+        update_fields["context"] = new_context
+    if new_citations is not None:
+        update_fields["citations"] = new_citations
+
+    result = chat_collection.update_one(filter_query, {"$set": update_fields})
+    if result.matched_count == 0:
+        print(f"⚠️ No matching chat found to update for user '{username}' and query '{user_query}'")
+    else:
+        print(f"✅ Updated chat response for user '{username}' and query '{user_query}'")
+
+# Save feedback
 def save_feedback(username, user_query, bot_response, rating, comments=None):
     feedback_doc = {
         "username": username,
         "query": user_query,
         "response": bot_response,
-        "rating": rating,  # e.g., 1 to 5 or "thumbs_up", "thumbs_down"
+        "rating": rating,
         "comments": comments,
         "timestamp": datetime.utcnow()
     }
     result = feedback_collection.insert_one(feedback_doc)
     print(f"Inserted feedback with id: {result.inserted_id}")
 
-# Query chatbot using Gemini
+# Query chatbot
 def query_chatbot(vector_store, user_query, chat_history, username=None):
-    relevant_chunks = vector_store.search(user_query, k=7)
-
+    is_greet = is_greeting(user_query)
+    relevant_chunks = [] if is_greet else vector_store.search(user_query, k=7)
+    
     context = "\n\n".join([chunk["content"] for chunk in relevant_chunks])
     formatted_history = "\n".join(
         [f"User: {entry['user']}\nBot: {entry['bot']}" for entry in chat_history]
@@ -120,10 +145,10 @@ Answer:
     response = model.generate_content(prompt)
     answer = response.text.strip()
 
-    is_greeting = user_query.lower() in greetings
     is_fallback = "i'm sorry, i couldn't find relevant information" in answer.lower()
 
-    if not (is_greeting or is_fallback) and relevant_chunks:
+    # Attach citations only if it's not greeting or fallback and relevant chunks exist
+    if not (is_greet or is_fallback) and relevant_chunks:
         citations_text = format_citations(relevant_chunks)
         answer += f"\n\n📚 Citations:\n{citations_text}"
 
